@@ -3,12 +3,12 @@
 use core::fmt::{self, Debug};
 use core::marker::PhantomData;
 
-use embedded_graphics::prelude::Point;
+use embedded_graphics::prelude::{DrawTarget, ImageDrawable, OriginDimensions, Point, Size};
+use embedded_graphics::Pixel;
 use embedded_graphics::{
     pixelcolor::{raw::RawU24, Rgb888},
     prelude::{PixelColor, RawData},
 };
-use embedded_graphics::{Drawable, Pixel};
 
 use crate::parser::{le_u16, take, take1, take_slice};
 
@@ -32,6 +32,7 @@ impl<'a> LenPrefixRawDataView<'a> {
         }
     }
 
+    #[inline]
     fn shift_cursor(&mut self) {
         if self.current_block.is_empty() {
             // nop
@@ -44,6 +45,7 @@ impl<'a> LenPrefixRawDataView<'a> {
     }
 
     // leave cursor untouched
+    #[inline]
     fn shift_next_block(&mut self) {
         if self.current_block.is_empty() {
             // no more blocks
@@ -63,6 +65,7 @@ impl<'a> LenPrefixRawDataView<'a> {
 impl Iterator for LenPrefixRawDataView<'_> {
     type Item = u8;
 
+    #[inline(always)]
     fn next(&mut self) -> Option<Self::Item> {
         if self.current_block.is_empty() {
             return None;
@@ -171,13 +174,18 @@ impl<'a> ColorTable<'a> {
     /// `None` is returned if `index` is out of bounds.
     pub fn get(&self, index: u8) -> Option<Rgb888> {
         // MSRV: Experiment with slice::as_chunks when it's stabilized
-
-        let offset = index as usize * 3;
-        let bytes = self.data.get(offset..offset + 3)?;
+        let base = 3 * (index as usize);
+        if base >= self.data.len() {
+            return None;
+        }
 
         Some(
-            RawU24::from_u32((bytes[0] as u32) << 16 | (bytes[1] as u32) << 8 | (bytes[2] as u32))
-                .into(),
+            RawU24::from_u32(
+                (self.data[base] as u32) << 16
+                    | (self.data[base + 1] as u32) << 8
+                    | (self.data[base + 2] as u32),
+            )
+            .into(),
         )
     }
 }
@@ -385,6 +393,14 @@ impl<'a> Segment<'a> {
             return Err(ParseError::InvalidByte);
         }
     }
+
+    pub const fn type_name(&self) -> &'static str {
+        match self {
+            Segment::Image(_) => "Image",
+            Segment::Extension(_) => "Extension",
+            Segment::Trailer => "Trailer",
+        }
+    }
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
@@ -451,21 +467,34 @@ impl<'a, C: PixelColor> Iterator for FrameIterator<'a, C> {
                 }
                 Segment::Extension(ExtensionBlock::GraphicControl(ctrl)) => {
                     let remain_data = input;
-                    while let Ok((input0, seg)) = Segment::parse(input) {
-                        match seg {
-                            Segment::Trailer => {
+
+                    // eat util next frame ctrl
+                    loop {
+                        match Segment::parse(input) {
+                            Ok((input0, seg)) => {
+                                input = input0;
+
+                                match seg {
+                                    Segment::Trailer => {
+                                        self.remain_raw_data = &[];
+                                        // this is the last frame
+                                        break;
+                                    }
+                                    Segment::Extension(ExtensionBlock::GraphicControl(_)) => {
+                                        self.remain_raw_data = remain_data; // until find next frame ctrl
+                                        break;
+                                    }
+                                    _ => (),
+                                }
+                            }
+                            Err(ParseError::JunkAfterTrailerByte) => {
                                 self.remain_raw_data = &[];
-                                // this is the last frame
                                 break;
                             }
-                            Segment::Extension(ExtensionBlock::GraphicControl(_)) => {
-                                self.remain_raw_data = input; // until find next frame ctrl
-                                break;
-                            }
-                            _ => (),
+                            Err(_) => panic!("unexpected error"),
                         }
-                        input = input0;
                     }
+
                     let frame = Frame {
                         delay_centis: ctrl.delay_centis,
                         is_transparent: ctrl.is_transparent,
@@ -490,23 +519,28 @@ pub struct Frame<'a, C> {
     pub delay_centis: u16,
     pub is_transparent: bool,
     pub transparent_color_index: u8,
-    pub global_color_table: Option<ColorTable<'a>>,
+    global_color_table: Option<ColorTable<'a>>,
     header: &'a Header,
     raw_data: &'a [u8],
     frame_index: usize,
     _marker: PhantomData<C>,
 }
 
-impl<'a, C> Drawable for Frame<'a, C>
+impl<'a, C> OriginDimensions for Frame<'a, C> {
+    fn size(&self) -> Size {
+        Size::new(self.header.width as _, self.header.height as _)
+    }
+}
+
+impl<'a, C> ImageDrawable for Frame<'a, C>
 where
     C: PixelColor + From<Rgb888>,
 {
     type Color = C;
-    type Output = ();
 
-    fn draw<D>(&self, target: &mut D) -> Result<Self::Output, D::Error>
+    fn draw<D>(&self, target: &mut D) -> Result<(), D::Error>
     where
-        D: embedded_graphics::prelude::DrawTarget<Color = Self::Color>,
+        D: DrawTarget<Color = Self::Color>,
     {
         let mut input = self.raw_data;
         while let Ok((input0, seg)) = Segment::parse(input) {
@@ -539,19 +573,82 @@ where
                     let mut decoder = lzw::Decoder::new(raw_image_data, lzw_min_code_size);
 
                     let mut idx: u32 = 0;
+
                     while let Ok(Some(decoded)) = decoder.decode_next() {
-                        for color in decoded.iter() {
+                        target.draw_iter(decoded.iter().filter_map(|color_index| {
                             idx += 1;
 
                             let x = left + (idx % u32::from(width)) as u16;
                             let y = top + (idx / u32::from(width)) as u16;
-                            if transparent_color_index == Some(*color) {
-                                continue;
+                            if transparent_color_index == Some(*color_index) {
+                                return None;
                             }
-                            let color = color_table.get(*color).unwrap();
-                            target
-                                .draw_iter([Pixel(Point::new(x as i32, y as i32), color.into())])?;
-                        }
+                            let color = color_table.get(*color_index).unwrap();
+                            Some(Pixel(Point::new(x as i32, y as i32), color.into()))
+                        }))?;
+                    }
+                }
+                _ => (),
+            }
+        }
+
+        Ok(())
+    }
+
+    fn draw_sub_image<D>(
+        &self,
+        target: &mut D,
+        area: &embedded_graphics::primitives::Rectangle,
+    ) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Self::Color>,
+    {
+        let mut input = self.raw_data;
+        while let Ok((input0, seg)) = Segment::parse(input) {
+            input = input0;
+            match seg {
+                Segment::Extension(ExtensionBlock::GraphicControl(_)) => {
+                    break;
+                }
+                Segment::Image(ImageBlock {
+                    left,
+                    top,
+                    width,
+                    lzw_min_code_size,
+                    local_color_table,
+                    image_data,
+                    ..
+                }) => {
+                    let transparent_color_index = if self.is_transparent {
+                        Some(self.transparent_color_index)
+                    } else {
+                        None
+                    };
+                    let color_table = local_color_table
+                        .or_else(|| self.global_color_table.clone())
+                        .unwrap();
+                    let raw_image_data = LenPrefixRawDataView::new(image_data);
+                    let mut decoder = lzw::Decoder::new(raw_image_data, lzw_min_code_size);
+
+                    let mut idx: u32 = 0;
+
+                    while let Ok(Some(decoded)) = decoder.decode_next() {
+                        target.draw_iter(decoded.iter().filter_map(|color_index| {
+                            idx += 1;
+
+                            let x = left + (idx % u32::from(width)) as u16;
+                            let y = top + (idx / u32::from(width)) as u16;
+                            if transparent_color_index == Some(*color_index) {
+                                return None;
+                            }
+                            let pt = Point::new(x as i32, y as i32);
+                            if area.contains(pt) {
+                                let color = color_table.get(*color_index).unwrap();
+                                Some(Pixel(pt, color.into()))
+                            } else {
+                                None
+                            }
+                        }))?;
                     }
                 }
                 _ => (),
@@ -569,8 +666,21 @@ impl fmt::Debug for Frame<'_, Rgb888> {
             .field("delay_centis", &self.delay_centis)
             .field("is_transparent", &self.is_transparent)
             .field("transparent_color_index", &self.transparent_color_index)
-            // .field("len(remain_data)", &self.raw_data.len())
+            .field("len(remain_data)", &self.raw_data.len())
             .finish()
+    }
+}
+
+#[cfg(feature = "defmt")]
+impl<C> defmt::Format for Frame<'_, C> {
+    fn format(&self, f: defmt::Formatter) {
+        defmt::write!(
+            f,
+            "Frame {{ frame_index: {}, delay_centis: {} remain: {}}}",
+            self.frame_index,
+            self.delay_centis,
+            self.raw_data.len()
+        );
     }
 }
 
