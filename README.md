@@ -6,6 +6,7 @@ This crate requires about 20kB of memory to decode a gif.
 - [x] basic decoding
 - [x] frame iterator
 - [ ] interlace support
+- [ ] fails on some highly compressed gifs: **Change table size in DecodingDict**
 
 ## Usage
 
