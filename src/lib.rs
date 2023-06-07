@@ -709,8 +709,6 @@ pub enum ParseError {
     UnexpectedEndOfFile,
 
     /// Invalid file signatures.
-    ///
-    /// BMP files must start with `BM`.
     InvalidFileSignature([u8; 3]),
 
     /// Unsupported compression method.

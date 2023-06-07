@@ -1,3 +1,5 @@
+//! Modified version of https://github.com/nwin/lzw
+
 use crate::{bitstream::BitStream, ParseError};
 
 const MAX_CODESIZE: u8 = 12;
