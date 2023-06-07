@@ -359,6 +359,20 @@ impl<'a> ExtensionBlock<'a> {
                     }),
                 ))
             }
+            0xfe => {
+                // Comment Extension
+                let mut input0 = input;
+                loop {
+                    let (input, block_size) = take1(input0)?;
+                    if block_size == 0 {
+                        input0 = input;
+                        break;
+                    }
+                    let (input, _data) = take_slice(input, block_size as usize)?;
+                    input0 = input;
+                }
+                Ok((input0, ExtensionBlock::Comment(&input[1..])))
+            }
             _ => unimplemented!(),
         }
     }

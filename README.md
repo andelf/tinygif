@@ -21,6 +21,11 @@ loop {
         info!("delay {}", delay_ms);
         // Delay here
         // Timer::after(Duration::from_millis(delay_ms as u64)).await;
+
+
+        // Or, draw at given offset
+        // (use embedded_graphics::prelude::DrawTargetExt;)
+        frame.draw(&mut display.translated(Point::new(30, 50))).unwrap();
     }
 }
 ```
