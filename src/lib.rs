@@ -1,10 +1,14 @@
-use core::fmt::Debug;
+#![no_std]
+
+use core::fmt::{self, Debug};
 use core::marker::PhantomData;
 
+use embedded_graphics::prelude::Point;
 use embedded_graphics::{
     pixelcolor::{raw::RawU24, Rgb888},
-    prelude::RawData,
+    prelude::{PixelColor, RawData},
 };
+use embedded_graphics::{Drawable, Pixel};
 
 use crate::parser::{le_u16, take, take1, take_slice};
 
@@ -109,9 +113,6 @@ impl Header {
         let (intput, screen_width) = le_u16(input)?;
         let (intput, screen_height) = le_u16(intput)?;
 
-        println!("screen_width: {}", screen_width);
-        println!("screen_height: {}", screen_height);
-
         let (input, flags) = take1(intput)?;
         let has_global_color_table = flags & 0b1000_0000 != 0;
         let global_color_table_size = if has_global_color_table {
@@ -193,7 +194,7 @@ pub struct RawGif<'a> {
 }
 
 impl<'a> RawGif<'a> {
-    pub fn from_slice(bytes: &'a [u8]) -> Result<Self, ParseError> {
+    fn from_slice(bytes: &'a [u8]) -> Result<Self, ParseError> {
         let (_remaining, (header, color_table)) = Header::parse(bytes)?;
 
         Ok(Self {
@@ -250,7 +251,6 @@ impl<'a> ImageBlock<'a> {
         };
 
         let (input, lzw_min_code_size) = take1(input)?;
-        //let (input, image_data) = take_slice(input, 0)?;
 
         let mut input0 = input;
         let mut n = 1;
@@ -329,7 +329,10 @@ impl<'a> ExtensionBlock<'a> {
             }
             0xf9 => {
                 // Graphic Control Extension
-                let (input, _block_size) = take1(input)?;
+                let (input, block_size) = take1(input)?; // 4
+                if block_size != 4 {
+                    return Err(ParseError::InvalidByte); // invalid block size
+                }
                 let (input, flags) = take1(input)?;
                 let is_transparent = flags & 0b0000_0001 != 0;
                 let (input, delay_centis) = le_u16(input)?;
@@ -385,9 +388,182 @@ impl<'a> Segment<'a> {
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub struct Gif<'a, C> {
+pub struct Gif<'a, C = Rgb888> {
     raw_gif: RawGif<'a>,
     color_type: PhantomData<C>,
+}
+
+impl<'a, C> Gif<'a, C> {
+    pub fn from_slice(input: &'a [u8]) -> Result<Self, ParseError> {
+        let raw_gif = RawGif::from_slice(input)?;
+        Ok(Self {
+            raw_gif,
+            color_type: PhantomData,
+        })
+    }
+
+    pub fn frames(&'a self) -> FrameIterator<'a, C> {
+        FrameIterator::new(self)
+    }
+}
+
+pub struct FrameIterator<'a, C> {
+    gif: &'a Gif<'a, C>,
+    frame_index: usize,
+    remain_raw_data: &'a [u8],
+}
+
+impl<'a, C> FrameIterator<'a, C> {
+    fn new(gif: &'a Gif<'a, C>) -> Self {
+        Self {
+            gif,
+            frame_index: 0,
+            remain_raw_data: gif.raw_gif.image_data,
+        }
+    }
+}
+
+impl<'a, C: PixelColor> Iterator for FrameIterator<'a, C> {
+    type Item = Frame<'a, C>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remain_raw_data.is_empty() {
+            return None;
+        }
+
+        let mut input = self.remain_raw_data;
+        loop {
+            let (input0, seg) = Segment::parse(input).ok()?;
+            input = input0;
+
+            match seg {
+                Segment::Trailer => {
+                    self.remain_raw_data = &[];
+                    return None;
+                }
+                Segment::Extension(ExtensionBlock::GraphicControl(ctrl)) => {
+                    let remain_data = input;
+                    while let Ok((input0, seg)) = Segment::parse(input) {
+                        match seg {
+                            Segment::Trailer => {
+                                self.remain_raw_data = &[];
+                                // this is the last frame
+                                break;
+                            }
+                            Segment::Extension(ExtensionBlock::GraphicControl(_)) => {
+                                self.remain_raw_data = input; // until find next frame ctrl
+                                break;
+                            }
+                            _ => (),
+                        }
+                        input = input0;
+                    }
+                    let frame = Frame {
+                        delay_centis: ctrl.delay_centis,
+                        is_transparent: ctrl.is_transparent,
+                        transparent_color_index: ctrl.transparent_color_index,
+                        global_color_table: self.gif.raw_gif.global_color_table.clone(),
+                        header: &self.gif.raw_gif.header,
+                        raw_data: remain_data,
+                        frame_index: self.frame_index,
+                        _marker: PhantomData,
+                    };
+                    self.frame_index += 1;
+                    return Some(frame);
+                }
+                _ => (),
+            }
+        }
+    }
+}
+
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct Frame<'a, C> {
+    pub delay_centis: u16,
+    pub is_transparent: bool,
+    pub transparent_color_index: u8,
+    pub global_color_table: Option<ColorTable<'a>>,
+    header: &'a Header,
+    raw_data: &'a [u8],
+    frame_index: usize,
+    _marker: PhantomData<C>,
+}
+
+impl<'a, C> Drawable for Frame<'a, C>
+where
+    C: PixelColor + From<Rgb888>,
+{
+    type Color = C;
+    type Output = ();
+
+    fn draw<D>(&self, target: &mut D) -> Result<Self::Output, D::Error>
+    where
+        D: embedded_graphics::prelude::DrawTarget<Color = Self::Color>,
+    {
+        let mut input = self.raw_data;
+        while let Ok((input0, seg)) = Segment::parse(input) {
+            input = input0;
+            match seg {
+                Segment::Extension(ExtensionBlock::GraphicControl(_)) => {
+                    // overflows to the next frame
+                    break;
+                }
+                Segment::Image(ImageBlock {
+                    left,
+                    top,
+                    width,
+                    // height,
+                    // is_interlaced,
+                    lzw_min_code_size,
+                    local_color_table,
+                    image_data,
+                    ..
+                }) => {
+                    let transparent_color_index = if self.is_transparent {
+                        Some(self.transparent_color_index)
+                    } else {
+                        None
+                    };
+                    let color_table = local_color_table
+                        .or_else(|| self.global_color_table.clone())
+                        .unwrap();
+                    let raw_image_data = LenPrefixRawDataView::new(image_data);
+                    let mut decoder = lzw::Decoder::new(raw_image_data, lzw_min_code_size);
+
+                    let mut idx = 0;
+                    while let Ok(Some(decoded)) = decoder.decode_next() {
+                        for color in decoded.iter() {
+                            idx += 1;
+
+                            let x = left + idx % width;
+                            let y = top + idx / width;
+                            if transparent_color_index == Some(*color) {
+                                continue;
+                            }
+                            let color = color_table.get(*color).unwrap();
+                            target
+                                .draw_iter([Pixel(Point::new(x as i32, y as i32), color.into())])?;
+                        }
+                    }
+                }
+                _ => (),
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl fmt::Debug for Frame<'_, Rgb888> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Frame")
+            .field("frame_index", &self.frame_index)
+            .field("delay_centis", &self.delay_centis)
+            .field("is_transparent", &self.is_transparent)
+            .field("transparent_color_index", &self.transparent_color_index)
+            // .field("len(remain_data)", &self.raw_data.len())
+            .finish()
+    }
 }
 
 /// Parse error.

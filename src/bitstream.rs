@@ -17,17 +17,6 @@ where
         }
     }
 
-    pub fn next_bit(&mut self) -> Option<bool> {
-        if self.bit_cursor == 8 {
-            self.byte = self.r.next()?;
-            self.bit_cursor = 0;
-        }
-
-        let bit = (self.byte >> self.bit_cursor) & 1 == 1;
-        self.bit_cursor += 1;
-        Some(bit)
-    }
-
     pub fn next_bits(&mut self, nbit: u8) -> Option<u16> {
         if nbit >= 16 {
             panic!("nbit must be < 16");

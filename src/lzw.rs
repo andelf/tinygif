@@ -25,8 +25,8 @@ impl DecodingDict {
     pub fn new(min_size: u8) -> DecodingDict {
         DecodingDict {
             min_size,
-            table: heapless::Vec::new(), // 512 is not enough for many gifs
-            buffer: heapless::Vec::new(), // 4096, (1 << MAX_CODESIZE as usize) - 1
+            table: heapless::Vec::new(),
+            buffer: heapless::Vec::new(),
         }
     }
 
