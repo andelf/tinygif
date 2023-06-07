@@ -80,13 +80,13 @@ pub enum Version {
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub struct Header {
     version: Version,
-    width: u16,
-    height: u16,
+    pub width: u16,
+    pub height: u16,
     has_global_color_table: bool,
     color_resolution: u8, // 3 bits
-    //  _is_sorted: bool,
-    bg_color_index: u8,
-    //    _pixel_aspect_ratio: u8
+    // _is_sorted: bool,
+    pub bg_color_index: u8,
+    // _pixel_aspect_ratio: u8
 }
 
 impl Header {
@@ -126,7 +126,7 @@ impl Header {
         let (input, _pixel_aspect_ratio) = take1(input)?;
 
         let (input, color_table) = if global_color_table_size > 0 {
-            // Each color table entry is 4 bytes long
+            // Each color table entry is 3 bytes long
             let (input, table) = take_slice(input, global_color_table_size * 3)?;
             (input, Some(ColorTable::new(table)))
         } else {
@@ -206,10 +206,10 @@ impl<'a> RawGif<'a> {
 
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub struct GraphicControl {
-    is_transparent: bool,
-    transparent_color_index: u8,
+    pub is_transparent: bool,
+    pub transparent_color_index: u8,
     // centisecond
-    delay_centis: u16,
+    pub delay_centis: u16,
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
@@ -220,7 +220,7 @@ pub struct ImageBlock<'a> {
     pub width: u16,
     pub height: u16,
     pub is_interlaced: bool,
-    lzw_min_code_size: u8,
+    pub lzw_min_code_size: u8,
     local_color_table: Option<ColorTable<'a>>,
     pub image_data: &'a [u8],
 }

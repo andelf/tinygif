@@ -6,6 +6,9 @@ const MAX_ENTRIES: usize = 1 << MAX_CODESIZE as usize;
 /// Alias for a LZW code point. It is a 9-bit unsigned integer.
 type Code = u16;
 
+// Do not use Option<Code>, to save memory
+const CODE_NONE: Code = u16::MAX;
+
 /// Decoding dictionary.
 ///
 /// It is not generic due to current limitations of Rust
@@ -13,8 +16,8 @@ type Code = u16;
 #[derive(Debug)]
 pub(crate) struct DecodingDict {
     min_size: u8,
-    table: heapless::Vec<(Option<Code>, u8), MAX_ENTRIES>,
-    buffer: heapless::Vec<u8, 1023>,
+    table: heapless::Vec<(Code, u8), 4096>, // FIXME: 4096 is not sufficient for some gifs
+    buffer: heapless::Vec<u8, 1024>,
 }
 
 impl DecodingDict {
@@ -31,25 +34,25 @@ impl DecodingDict {
     pub fn reset(&mut self) {
         self.table.clear();
         for i in 0..(1u16 << self.min_size as usize) {
-            self.table.push((None, i as u8)).unwrap();
+            self.table.push((CODE_NONE, i as u8)).unwrap();
         }
     }
 
     /// Inserts a value into the dict
     #[inline(always)]
-    pub fn push(&mut self, key: Option<Code>, value: u8) {
+    pub fn push(&mut self, key: Code, value: u8) {
         self.table.push((key, value)).unwrap(); // TODO: overflow check
     }
 
     /// Reconstructs the data for the corresponding code
-    pub fn reconstruct(&mut self, code: Option<Code>) -> Result<&[u8], ParseError> {
+    pub fn reconstruct(&mut self, code: Code) -> Result<&[u8], ParseError> {
         self.buffer.clear();
         let mut code = code;
         let mut cha;
         // Check the first access more thoroughly since a bad code
         // could occur if the data is malformed
-        if let Some(k) = code {
-            match self.table.get(k as usize) {
+        if code != CODE_NONE {
+            match self.table.get(code as usize) {
                 Some(&(code_, cha_)) => {
                     code = code_;
                     cha = cha_;
@@ -60,7 +63,7 @@ impl DecodingDict {
             }
             self.buffer.push(cha).unwrap();
         }
-        while let Some(k) = code {
+        while code != CODE_NONE {
             if self.buffer.len() >= MAX_ENTRIES {
                 return Err(ParseError::InvalidByte); // Invalid code sequence. Cycle in decoding table
             }
@@ -68,7 +71,7 @@ impl DecodingDict {
             // Note: This could possibly be replaced with an unchecked array access if
             //  - value is asserted to be < self.next_code() in push
             //  - min_size is asserted to be < MAX_CODESIZE
-            let entry = self.table[k as usize];
+            let entry = self.table[code as usize];
             code = entry.0;
             cha = entry.1;
             self.buffer.push(cha).unwrap();
@@ -92,7 +95,7 @@ impl DecodingDict {
 
 pub struct Decoder<I: Iterator<Item = u8>> {
     bs: BitStream<I>,
-    prev: Option<Code>,
+    prev: Code,
     table: DecodingDict,
     buf: [u8; 1],
     code_size: u8,
@@ -111,7 +114,7 @@ where
         let table = DecodingDict::new(min_code_size);
         Decoder {
             bs: BitStream::new(r),
-            prev: None,
+            prev: CODE_NONE,
             table,
             buf: [0],
             code_size: min_code_size + 1,
@@ -129,10 +132,10 @@ where
 
         if code == self.clear_code {
             self.table.reset();
-            self.table.push(None, 0); // clear code
-            self.table.push(None, 0); // end code
+            self.table.push(CODE_NONE, 0); // clear code
+            self.table.push(CODE_NONE, 0); // end code
             self.code_size = self.min_code_size + 1;
-            self.prev = None;
+            self.prev = CODE_NONE;
             Ok(Some(&[]))
         } else if code == self.end_code {
             Ok(Some(&[]))
@@ -142,16 +145,16 @@ where
                 return Err(ParseError::InvalidByte); // invalid code 9bit, should be LE next_code
             }
             let prev = self.prev;
-            let result = if prev.is_none() {
+            let result = if prev == CODE_NONE {
                 self.buf = [code as u8];
                 &self.buf[..]
             } else {
                 if code == next_code {
                     let chr = self.table.reconstruct(prev)?[0];
                     self.table.push(prev, chr);
-                    self.table.reconstruct(Some(code))?
+                    self.table.reconstruct(code)?
                 } else if code < next_code {
-                    let chr = self.table.reconstruct(Some(code))?[0];
+                    let chr = self.table.reconstruct(code)?[0];
                     self.table.push(prev, chr);
                     self.table.buffer()
                 } else {
@@ -161,7 +164,7 @@ where
             if next_code == (1 << self.code_size as usize) - 1 && self.code_size < MAX_CODESIZE {
                 self.code_size += 1;
             }
-            self.prev = Some(code);
+            self.prev = code;
             Ok(Some(result))
         }
     }
