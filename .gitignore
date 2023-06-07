@@ -1,2 +1,8 @@
 /target
 /Cargo.lock
+/trash
+
+# local test images
+*.bmp
+*.gif
+*.png
