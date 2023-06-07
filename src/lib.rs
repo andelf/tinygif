@@ -405,6 +405,14 @@ impl<'a, C> Gif<'a, C> {
     pub fn frames(&'a self) -> FrameIterator<'a, C> {
         FrameIterator::new(self)
     }
+
+    pub fn width(&self) -> u16 {
+        self.raw_gif.header.width
+    }
+
+    pub fn height(&self) -> u16 {
+        self.raw_gif.header.height
+    }
 }
 
 pub struct FrameIterator<'a, C> {
@@ -530,13 +538,13 @@ where
                     let raw_image_data = LenPrefixRawDataView::new(image_data);
                     let mut decoder = lzw::Decoder::new(raw_image_data, lzw_min_code_size);
 
-                    let mut idx = 0;
+                    let mut idx: u32 = 0;
                     while let Ok(Some(decoded)) = decoder.decode_next() {
                         for color in decoded.iter() {
                             idx += 1;
 
-                            let x = left + idx % width;
-                            let y = top + idx / width;
+                            let x = left + (idx % u32::from(width)) as u16;
+                            let y = top + (idx / u32::from(width)) as u16;
                             if transparent_color_index == Some(*color) {
                                 continue;
                             }
