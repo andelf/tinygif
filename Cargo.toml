@@ -1,12 +1,12 @@
 [package]
 name = "tinygif"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 authors = ["Andelf <andelf@gmail.com>"]
 repository = "https://github.com/andelf/tinygif"
 documentation = "https://docs.rs/tinygif"
 homepage = "https://github.com/andelf/tinygif"
-categories = ["embedded-graphics", "image-processing", "gif"]
+categories = ["embedded", "no-std", "multimedia::images"]
 description = "No-std, high memory footprint GIF image loader"
 keywords = ["graphics", "embedded-graphics", "gif", "animation", "image"]
 readme = "README.md"
