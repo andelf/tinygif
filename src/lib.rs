@@ -589,15 +589,16 @@ where
                     let mut idx: u32 = 0;
 
                     while let Ok(Some(decoded)) = decoder.decode_next() {
-                        target.draw_iter(decoded.iter().filter_map(|color_index| {
-                            idx += 1;
-
+                        target.draw_iter(decoded.iter().filter_map(|&color_index| {
                             let x = left + (idx % u32::from(width)) as u16;
                             let y = top + (idx / u32::from(width)) as u16;
-                            if transparent_color_index == Some(*color_index) {
+
+                            idx += 1;
+
+                            if transparent_color_index == Some(color_index) {
                                 return None;
                             }
-                            let color = color_table.get(*color_index).unwrap();
+                            let color = color_table.get(color_index).unwrap();
                             Some(Pixel(Point::new(x as i32, y as i32), color.into()))
                         }))?;
                     }
@@ -648,10 +649,10 @@ where
 
                     while let Ok(Some(decoded)) = decoder.decode_next() {
                         target.draw_iter(decoded.iter().filter_map(|color_index| {
-                            idx += 1;
-
                             let x = left + (idx % u32::from(width)) as u16;
                             let y = top + (idx / u32::from(width)) as u16;
+                            idx += 1;
+
                             if transparent_color_index == Some(*color_index) {
                                 return None;
                             }
