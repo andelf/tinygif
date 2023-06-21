@@ -2,7 +2,4 @@
 /Cargo.lock
 /trash
 
-# local test images
-*.bmp
-*.gif
-*.png
+.DS_Store

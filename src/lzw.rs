@@ -18,7 +18,11 @@ const CODE_NONE: Code = u16::MAX;
 #[derive(Debug)]
 pub(crate) struct DecodingDict {
     min_size: u8,
-    table: heapless::Vec<(Code, u8), 4096>, // FIXME: 4096 is not sufficient for some gifs
+    #[cfg(feature = "8k")]
+    table: heapless::Vec<(Code, u8), 8192>,
+    // FIXME: 4096 is not sufficient for some gifs
+    #[cfg(not(feature = "8k"))]
+    table: heapless::Vec<(Code, u8), 4096>,
     buffer: heapless::Vec<u8, 1024>,
 }
 

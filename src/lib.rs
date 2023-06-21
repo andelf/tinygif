@@ -1,3 +1,5 @@
+//! tinygif - A tiny GIF decoder for embedded systems.
+
 #![no_std]
 
 use core::fmt::{self, Debug};

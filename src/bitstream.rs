@@ -1,3 +1,5 @@
+//! Read different number of bits from a byte stream
+
 pub struct BitStream<I: Iterator<Item = u8>> {
     r: I,
     byte: u8,
