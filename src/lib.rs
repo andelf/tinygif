@@ -411,19 +411,13 @@ impl<'a> Segment<'a> {
         }
     }
 
-    fn skip_to_next_graphic_control(mut input: &[u8], mut nth: usize) -> Result<&[u8], ParseError> {
+    fn skip_to_next_graphic_control(mut input: &[u8]) -> Result<&[u8], ParseError> {
         loop {
             let (input0, ext_magic) = take1(input)?;
             if ext_magic == 0x21 {
                 let (input1, label) = take1(input0)?;
                 if label == 0xF9 {
-                    if nth == 0 {
-                        return Ok(input);
-                    } else {
-                        nth -= 1;
-                        let (input2, _) = take::<6>(input1)?;
-                        input = input2;
-                    }
+                    return Ok(input);
                 } else if label == 0xFF {
                     // Application Extension
                     input = eat_len_prefixed_subblocks(input1)?;
@@ -513,13 +507,10 @@ impl<'a, C: PixelColor> Iterator for FrameIterator<'a, C> {
         }
 
         let input = self.remain_raw_data;
-
-        // next graphic control
-        let input0 = Segment::skip_to_next_graphic_control(input, 0).ok()?;
-        let input1 = Segment::skip_to_next_graphic_control(input0, 1).ok()?;
-        self.remain_raw_data = input1;
+        let input0 = Segment::skip_to_next_graphic_control(input).ok()?;
 
         let (input00, seg) = Segment::parse(input0).ok()?;
+        self.remain_raw_data = input00;
 
         if let Segment::Extension(ExtensionBlock::GraphicControl(ctrl)) = seg {
             let frame = Frame {
@@ -572,7 +563,7 @@ where
         while let Ok((input0, seg)) = Segment::parse(input) {
             input = input0;
             match seg {
-                Segment::Extension(ExtensionBlock::GraphicControl(_)) => {
+                Segment::Extension(ExtensionBlock::GraphicControl(_)) | Segment::Trailer => {
                     // overflows to the next frame
                     break;
                 }
@@ -633,7 +624,8 @@ where
         while let Ok((input0, seg)) = Segment::parse(input) {
             input = input0;
             match seg {
-                Segment::Extension(ExtensionBlock::GraphicControl(_)) => {
+                Segment::Extension(ExtensionBlock::GraphicControl(_)) | Segment::Trailer => {
+                    // overflows to the next frame
                     break;
                 }
                 Segment::Image(ImageBlock {
