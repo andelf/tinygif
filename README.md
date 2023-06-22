@@ -34,7 +34,7 @@ loop {
 
 MIT or Apache-2.0 at your option.
 
-### License of the gif file used in test
+### License of the gif files used in test
 
 > Animated Ferris in Action
 > Happy as a Rustacean at Rust Fest Berlin 2016 (www.rustfest.eu)

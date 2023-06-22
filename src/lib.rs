@@ -7,10 +7,8 @@ use core::marker::PhantomData;
 
 use embedded_graphics::prelude::{DrawTarget, ImageDrawable, OriginDimensions, Point, Size};
 use embedded_graphics::Pixel;
-use embedded_graphics::{
-    pixelcolor::{raw::RawU24, Rgb888},
-    prelude::{PixelColor, RawData},
-};
+use embedded_graphics::{pixelcolor::Rgb888, prelude::PixelColor};
+use parser::eat_len_prefixed_subblocks;
 
 use crate::parser::{le_u16, take, take1, take_slice};
 
@@ -18,7 +16,8 @@ mod bitstream;
 pub mod lzw;
 mod parser;
 
-pub struct LenPrefixRawDataView<'a> {
+/// Len byte prefixed raw bytes, as used in GIFs.
+struct LenPrefixRawDataView<'a> {
     remains: &'a [u8],
     current_block: &'a [u8],
     cursor: u8,
@@ -175,20 +174,16 @@ impl<'a> ColorTable<'a> {
     ///
     /// `None` is returned if `index` is out of bounds.
     pub fn get(&self, index: u8) -> Option<Rgb888> {
-        // MSRV: Experiment with slice::as_chunks when it's stabilized
         let base = 3 * (index as usize);
         if base >= self.data.len() {
             return None;
         }
 
-        Some(
-            RawU24::from_u32(
-                (self.data[base] as u32) << 16
-                    | (self.data[base + 1] as u32) << 8
-                    | (self.data[base + 2] as u32),
-            )
-            .into(),
-        )
+        Some(Rgb888::new(
+            self.data[base],
+            self.data[base + 1],
+            self.data[base + 2],
+        ))
     }
 }
 
@@ -200,17 +195,17 @@ pub struct RawGif<'a> {
     global_color_table: Option<ColorTable<'a>>,
 
     /// Image data.
-    image_data: &'a [u8],
+    raw_block_data: &'a [u8],
 }
 
 impl<'a> RawGif<'a> {
     fn from_slice(bytes: &'a [u8]) -> Result<Self, ParseError> {
-        let (_remaining, (header, color_table)) = Header::parse(bytes)?;
+        let (remaining, (header, color_table)) = Header::parse(bytes)?;
 
         Ok(Self {
             header,
             global_color_table: color_table,
-            image_data: _remaining,
+            raw_block_data: remaining,
         })
     }
 }
@@ -233,7 +228,7 @@ pub struct ImageBlock<'a> {
     pub is_interlaced: bool,
     pub lzw_min_code_size: u8,
     local_color_table: Option<ColorTable<'a>>,
-    pub image_data: &'a [u8],
+    image_data: &'a [u8],
 }
 
 impl<'a> ImageBlock<'a> {
@@ -295,7 +290,8 @@ impl<'a> ImageBlock<'a> {
 pub enum ExtensionBlock<'a> {
     GraphicControl(GraphicControl),
     Comment(&'a [u8]),
-    PlainText(&'a [u8]),
+    // TODO: handle PlainTextExtension
+    PlainText,
     NetscapeApplication { repetitions: u16 },
     Application, // ignore content
     Unknown(u8, &'a [u8]),
@@ -337,11 +333,25 @@ impl<'a> ExtensionBlock<'a> {
                 }
                 Ok((input0, ExtensionBlock::Application))
             }
+            0xfe => {
+                // Comment Extension
+                let mut input0 = input;
+                loop {
+                    let (input, block_size) = take1(input0)?;
+                    if block_size == 0 {
+                        input0 = input;
+                        break;
+                    }
+                    let (input, _data) = take_slice(input, block_size as usize)?;
+                    input0 = input;
+                }
+                Ok((input0, ExtensionBlock::Comment(&input[1..])))
+            }
             0xf9 => {
                 // Graphic Control Extension
                 let (input, block_size) = take1(input)?; // 4
                 if block_size != 4 {
-                    return Err(ParseError::InvalidByte); // invalid block size
+                    return Err(ParseError::InvalidConstSizeBytes); // invalid block size
                 }
                 let (input, flags) = take1(input)?;
                 let is_transparent = flags & 0b0000_0001 != 0;
@@ -361,19 +371,10 @@ impl<'a> ExtensionBlock<'a> {
                     }),
                 ))
             }
-            0xfe => {
-                // Comment Extension
-                let mut input0 = input;
-                loop {
-                    let (input, block_size) = take1(input0)?;
-                    if block_size == 0 {
-                        input0 = input;
-                        break;
-                    }
-                    let (input, _data) = take_slice(input, block_size as usize)?;
-                    input0 = input;
-                }
-                Ok((input0, ExtensionBlock::Comment(&input[1..])))
+            0x01 => {
+                let (input, _) = take::<13>(input)?;
+                let input = eat_len_prefixed_subblocks(input)?;
+                Ok((input, ExtensionBlock::PlainText))
             }
             _ => unimplemented!(),
         }
@@ -407,6 +408,46 @@ impl<'a> Segment<'a> {
             }
         } else {
             return Err(ParseError::InvalidByte);
+        }
+    }
+
+    fn skip_to_next_graphic_control(mut input: &[u8], mut nth: usize) -> Result<&[u8], ParseError> {
+        loop {
+            let (input0, ext_magic) = take1(input)?;
+            if ext_magic == 0x21 {
+                let (input1, label) = take1(input0)?;
+                if label == 0xF9 {
+                    if nth == 0 {
+                        return Ok(input);
+                    } else {
+                        nth -= 1;
+                        let (input2, _) = take::<6>(input1)?;
+                        input = input2;
+                    }
+                } else if label == 0xFF {
+                    // Application Extension
+                    input = eat_len_prefixed_subblocks(input1)?;
+                } else if label == 0x01 {
+                    // Plain Text Extension
+                    // Ref: https://www.w3.org/Graphics/GIF/spec-gif89a.txt
+                    let (input2, _) = take::<13>(input1)?;
+                    input = eat_len_prefixed_subblocks(input2)?;
+                } else if label == 0xFE {
+                    // Comment Extension
+                    input = eat_len_prefixed_subblocks(input1)?;
+                } else {
+                    return Err(ParseError::InvalidExtensionLabel);
+                }
+            } else if ext_magic == 0x2c {
+                // Image Descriptor
+                let (input1, _) = take::<10>(input0)?;
+                // remain lzw encoding raw image data
+                input = eat_len_prefixed_subblocks(input1)?;
+            } else if ext_magic == 0x3b {
+                return Ok(&[]);
+            } else {
+                return Err(ParseError::InvalidByte);
+            }
         }
     }
 
@@ -458,7 +499,7 @@ impl<'a, C> FrameIterator<'a, C> {
         Self {
             gif,
             frame_index: 0,
-            remain_raw_data: gif.raw_gif.image_data,
+            remain_raw_data: gif.raw_gif.raw_block_data,
         }
     }
 }
@@ -471,61 +512,30 @@ impl<'a, C: PixelColor> Iterator for FrameIterator<'a, C> {
             return None;
         }
 
-        let mut input = self.remain_raw_data;
-        loop {
-            let (input0, seg) = Segment::parse(input).ok()?;
-            input = input0;
+        let input = self.remain_raw_data;
 
-            match seg {
-                Segment::Trailer => {
-                    self.remain_raw_data = &[];
-                    return None;
-                }
-                Segment::Extension(ExtensionBlock::GraphicControl(ctrl)) => {
-                    let remain_data = input;
+        // next graphic control
+        let input0 = Segment::skip_to_next_graphic_control(input, 0).ok()?;
+        let input1 = Segment::skip_to_next_graphic_control(input0, 1).ok()?;
+        self.remain_raw_data = input1;
 
-                    // eat util next frame ctrl
-                    loop {
-                        match Segment::parse(input) {
-                            Ok((input0, seg)) => {
-                                input = input0;
+        let (input00, seg) = Segment::parse(input0).ok()?;
 
-                                match seg {
-                                    Segment::Trailer => {
-                                        self.remain_raw_data = &[];
-                                        // this is the last frame
-                                        break;
-                                    }
-                                    Segment::Extension(ExtensionBlock::GraphicControl(_)) => {
-                                        self.remain_raw_data = remain_data; // until find next frame ctrl
-                                        break;
-                                    }
-                                    _ => (),
-                                }
-                            }
-                            Err(ParseError::JunkAfterTrailerByte) => {
-                                self.remain_raw_data = &[];
-                                break;
-                            }
-                            Err(_) => panic!("unexpected error"),
-                        }
-                    }
-
-                    let frame = Frame {
-                        delay_centis: ctrl.delay_centis,
-                        is_transparent: ctrl.is_transparent,
-                        transparent_color_index: ctrl.transparent_color_index,
-                        global_color_table: self.gif.raw_gif.global_color_table.clone(),
-                        header: &self.gif.raw_gif.header,
-                        raw_data: remain_data,
-                        frame_index: self.frame_index,
-                        _marker: PhantomData,
-                    };
-                    self.frame_index += 1;
-                    return Some(frame);
-                }
-                _ => (),
-            }
+        if let Segment::Extension(ExtensionBlock::GraphicControl(ctrl)) = seg {
+            let frame = Frame {
+                delay_centis: ctrl.delay_centis,
+                is_transparent: ctrl.is_transparent,
+                transparent_color_index: ctrl.transparent_color_index,
+                global_color_table: self.gif.raw_gif.global_color_table.clone(),
+                header: &self.gif.raw_gif.header,
+                raw_data: input00,
+                frame_index: self.frame_index,
+                _marker: PhantomData,
+            };
+            self.frame_index += 1;
+            return Some(frame);
+        } else {
+            None
         }
     }
 }
@@ -570,8 +580,6 @@ where
                     left,
                     top,
                     width,
-                    // height,
-                    // is_interlaced,
                     lzw_min_code_size,
                     local_color_table,
                     image_data,
@@ -592,14 +600,15 @@ where
 
                     while let Ok(Some(decoded)) = decoder.decode_next() {
                         target.draw_iter(decoded.iter().filter_map(|&color_index| {
-                            let x = left + (idx % u32::from(width)) as u16;
-                            let y = top + (idx / u32::from(width)) as u16;
-
-                            idx += 1;
-
                             if transparent_color_index == Some(color_index) {
+                                // skip drawing transparent color
+                                idx += 1;
                                 return None;
                             }
+                            let x = left + (idx % u32::from(width)) as u16;
+                            let y = top + (idx / u32::from(width)) as u16;
+                            idx += 1;
+
                             let color = color_table.get(color_index).unwrap();
                             Some(Pixel(Point::new(x as i32, y as i32), color.into()))
                         }))?;
@@ -650,17 +659,19 @@ where
                     let mut idx: u32 = 0;
 
                     while let Ok(Some(decoded)) = decoder.decode_next() {
-                        target.draw_iter(decoded.iter().filter_map(|color_index| {
+                        target.draw_iter(decoded.iter().filter_map(|&color_index| {
+                            if transparent_color_index == Some(color_index) {
+                                idx += 1;
+                                return None;
+                            }
+
                             let x = left + (idx % u32::from(width)) as u16;
                             let y = top + (idx / u32::from(width)) as u16;
                             idx += 1;
 
-                            if transparent_color_index == Some(*color_index) {
-                                return None;
-                            }
                             let pt = Point::new(x as i32, y as i32);
                             if area.contains(pt) {
-                                let color = color_table.get(*color_index).unwrap();
+                                let color = color_table.get(color_index).unwrap();
                                 Some(Pixel(pt, color.into()))
                             } else {
                                 None
@@ -728,4 +739,9 @@ pub enum ParseError {
     InvalidByte,
 
     JunkAfterTrailerByte,
+
+    /// Current size bytes should be a constant.
+    InvalidConstSizeBytes,
+
+    InvalidExtensionLabel,
 }

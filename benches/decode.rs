@@ -16,15 +16,16 @@ fn decode_gif() {
         { embedded_graphics::framebuffer::buffer_size::<Rgb565>(240, 240) },
     > = Framebuffer::new();
 
+    let mut i = 0;
     for frame in im.frames() {
         frame.draw(&mut fb).unwrap(); // dummy draw and color mapping from Rgb888 to Rgb565
+        i += 1;
     }
+    assert_eq!(i, 127);
 }
 
 fn bench_gif_decoder(c: &mut Criterion) {
-    c.bench_function("decode Animated Ferris", |b| {
-        b.iter(|| decode_gif())
-    });
+    c.bench_function("decode Animated Ferris", |b| b.iter(|| decode_gif()));
 }
 
 criterion_group!(benches, bench_gif_decoder);
