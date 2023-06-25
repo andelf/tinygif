@@ -679,7 +679,7 @@ where
     }
 }
 
-impl fmt::Debug for Frame<'_, Rgb888> {
+impl<C> fmt::Debug for Frame<'_, C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Frame")
             .field("frame_index", &self.frame_index)
