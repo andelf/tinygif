@@ -336,16 +336,19 @@ impl<'a> ExtensionBlock<'a> {
             0xfe => {
                 // Comment Extension
                 let mut input0 = input;
+                let mut size = 0;
                 loop {
                     let (input, block_size) = take1(input0)?;
+                    size += 1;
                     if block_size == 0 {
                         input0 = input;
                         break;
                     }
                     let (input, _data) = take_slice(input, block_size as usize)?;
                     input0 = input;
+                    size += block_size as usize;
                 }
-                Ok((input0, ExtensionBlock::Comment(&input[1..])))
+                Ok((input0, ExtensionBlock::Comment(&input[..size])))
             }
             0xf9 => {
                 // Graphic Control Extension
@@ -434,11 +437,15 @@ impl<'a> Segment<'a> {
                 }
             } else if ext_magic == 0x2c {
                 // Image Descriptor
-                let (input1, _) = take::<10>(input0)?;
-                // remain lzw encoding raw image data
-                input = eat_len_prefixed_subblocks(input1)?;
+                // parse image, optional local color table
+                let (input1, _) = ImageBlock::parse(input0)?;
+                input = input1;
             } else if ext_magic == 0x3b {
+                // Trailer
                 return Ok(&[]);
+            } else if ext_magic == 0x00 {
+                // Block Terminator
+                return Ok(input0);
             } else {
                 return Err(ParseError::InvalidByte);
             }
