@@ -4,7 +4,6 @@
 
 use core::fmt::{self, Debug};
 use core::marker::PhantomData;
-use core::num::flt2dec::decoder;
 
 use embedded_graphics::prelude::{
     DrawTarget, ImageDrawable, OriginDimensions, Point, RgbColor, Size,
