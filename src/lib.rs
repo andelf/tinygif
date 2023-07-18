@@ -6,7 +6,7 @@ use core::fmt::{self, Debug};
 use core::marker::PhantomData;
 
 use embedded_graphics::prelude::{
-    DrawTarget, ImageDrawable, OriginDimensions, Point, RgbColor, Size,
+    DrawTarget, ImageDrawable, OriginDimensions, Point, RgbColor, Size, WebColors,
 };
 use embedded_graphics::primitives::Rectangle;
 use embedded_graphics::Pixel;
@@ -598,11 +598,9 @@ where
                         .or_else(|| self.global_color_table.clone())
                         .unwrap();
                     let raw_image_data = LenPrefixRawDataView::new(image_data);
-                    let mut decoder = lzw::Decoder::new(raw_image_data, lzw_min_code_size);
+                    let decoder = lzw::Decoder::new(raw_image_data, lzw_min_code_size);
 
-                    let mut idx: u32 = 0;
-
-                    let mut decoder_wrapper = DecodeIterWrapper::new(decoder);
+                    let decoder_wrapper = DecodeIterWrapper::new(decoder);
                     target.fill_contiguous(
                         &Rectangle::new(
                             Point {
@@ -615,26 +613,10 @@ where
                             },
                         ),
                         decoder_wrapper.into_iter().map(|color_index| {
-                            let color = color_table.get(color_index).unwrap_or(Rgb888::BLACK);
+                            let color = color_table.get(color_index).unwrap_or(Rgb888::CSS_PURPLE);
                             color.into()
                         }),
-                    );
-
-                    // while let Ok(Some(decoded)) = decoder.decode_next() {
-                    //     target.draw_iter(decoded.iter().filter_map(|&color_index| {
-                    //         if transparent_color_index == Some(color_index) {
-                    //             // skip drawing transparent color
-                    //             idx += 1;
-                    //             return None;
-                    //         }
-                    //         let x = left + (idx % u32::from(width)) as u16;
-                    //         let y = top + (idx / u32::from(width)) as u16;
-                    //         idx += 1;
-
-                    //         let color = color_table.get(color_index).unwrap();
-                    //         Some(Pixel(Point::new(x as i32, y as i32), color.into()))
-                    //     }))?;
-                    // }
+                    )?;
                 }
                 _ => (),
             }
@@ -663,7 +645,6 @@ where
                     left,
                     top,
                     width,
-                    height,
                     lzw_min_code_size,
                     local_color_table,
                     image_data,
@@ -772,7 +753,7 @@ pub enum ParseError {
 
 struct DecodeIterWrapper<I: Iterator<Item = u8>> {
     decoder: Decoder<I>,
-    inner_buffer: Vec<u8, 256>,
+    inner_buffer: Vec<u8, 1024>,
 }
 
 impl<I: Iterator<Item = u8>> DecodeIterWrapper<I> {
@@ -788,11 +769,13 @@ impl<I: Iterator<Item = u8>> Iterator for DecodeIterWrapper<I> {
     type Item = u8;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.inner_buffer.len() == 0 {
+        while self.inner_buffer.len() == 0 {
             if let Ok(Some(decoded)) = self.decoder.decode_next() {
-                for item in decoded {
-                    self.inner_buffer.push(*item);
+                for item in decoded.into_iter() {
+                    self.inner_buffer.push(*item).unwrap();
                 }
+            } else {
+                return None;
             }
         }
         self.inner_buffer.pop()
