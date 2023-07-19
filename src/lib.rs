@@ -467,21 +467,24 @@ impl<'a> Segment<'a> {
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub struct Gif<'a, C = Rgb888> {
+pub struct Gif<'a, const N: usize, C = Rgb888> {
     raw_gif: RawGif<'a>,
     color_type: PhantomData<C>,
+    // framebuffer
+    gif_framebuffer: [u8; N],
 }
 
-impl<'a, C> Gif<'a, C> {
+impl<'a, const N: usize, C> Gif<'a, N, C> {
     pub fn from_slice(input: &'a [u8]) -> Result<Self, ParseError> {
         let raw_gif = RawGif::from_slice(input)?;
         Ok(Self {
             raw_gif,
             color_type: PhantomData,
+            gif_framebuffer: [0; N],
         })
     }
 
-    pub fn frames(&'a self) -> FrameIterator<'a, C> {
+    pub fn frames(&'a self) -> FrameIterator<'a, N, C> {
         FrameIterator::new(self)
     }
 
@@ -494,14 +497,14 @@ impl<'a, C> Gif<'a, C> {
     }
 }
 
-pub struct FrameIterator<'a, C> {
-    gif: &'a Gif<'a, C>,
+pub struct FrameIterator<'a, const N: usize, C> {
+    gif: &'a Gif<'a, N, C>,
     frame_index: usize,
     remain_raw_data: &'a [u8],
 }
 
-impl<'a, C> FrameIterator<'a, C> {
-    fn new(gif: &'a Gif<'a, C>) -> Self {
+impl<'a, const N: usize, C> FrameIterator<'a, N, C> {
+    fn new(gif: &'a Gif<'a, N, C>) -> Self {
         Self {
             gif,
             frame_index: 0,
@@ -510,8 +513,8 @@ impl<'a, C> FrameIterator<'a, C> {
     }
 }
 
-impl<'a, C: PixelColor> Iterator for FrameIterator<'a, C> {
-    type Item = Frame<'a, C>;
+impl<'a, const N: usize, C: PixelColor> Iterator for FrameIterator<'a, N, C> {
+    type Item = Frame<'a, N, C>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.remain_raw_data.is_empty() {
@@ -533,6 +536,7 @@ impl<'a, C: PixelColor> Iterator for FrameIterator<'a, C> {
                 header: &self.gif.raw_gif.header,
                 raw_data: input00,
                 frame_index: self.frame_index,
+                gif: *self.gif,
                 _marker: PhantomData,
             };
             self.frame_index += 1;
@@ -544,7 +548,7 @@ impl<'a, C: PixelColor> Iterator for FrameIterator<'a, C> {
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct Frame<'a, C> {
+pub struct Frame<'a, const N: usize, C> {
     pub delay_centis: u16,
     pub is_transparent: bool,
     pub transparent_color_index: u8,
@@ -553,15 +557,16 @@ pub struct Frame<'a, C> {
     raw_data: &'a [u8],
     frame_index: usize,
     _marker: PhantomData<C>,
+    gif: Gif<'a, N, C>,
 }
 
-impl<'a, C> OriginDimensions for Frame<'a, C> {
+impl<'a, const N: usize, C> OriginDimensions for Frame<'a, N, C> {
     fn size(&self) -> Size {
         Size::new(self.header.width as _, self.header.height as _)
     }
 }
 
-impl<'a, C> ImageDrawable for Frame<'a, C>
+impl<'a, const N: usize, C> ImageDrawable for Frame<'a, N, C>
 where
     C: PixelColor + From<Rgb888>,
 {
@@ -597,23 +602,34 @@ where
                     let color_table = local_color_table
                         .or_else(|| self.global_color_table.clone())
                         .unwrap();
-                    let raw_image_data = LenPrefixRawDataView::new(image_data);
-                    let decoder = lzw::Decoder::new(raw_image_data, lzw_min_code_size);
 
-                    let decoder_wrapper = DecodeIterWrapper::new(decoder);
+                    let raw_image_data = LenPrefixRawDataView::new(image_data);
+                    let mut decoder = lzw::Decoder::new(raw_image_data, lzw_min_code_size);
+
+                    let mut idx: usize = ((top as usize) * (width as usize)) + (left as usize);
+                    let mut fb = self.gif.gif_framebuffer;
+
+                    while let Ok(Some(decoded)) = decoder.decode_next() {
+                        for color_index in decoded.iter() {
+                            if let Some(transparent_color_index) = transparent_color_index {
+                                if transparent_color_index == *color_index {
+                                    idx += 1;
+                                    continue;
+                                }
+                            }
+
+                            fb[idx] = *color_index;
+                            idx += 1;
+                        }
+                    }
+
                     target.fill_contiguous(
-                        &Rectangle::new(
-                            Point {
-                                x: left.into(),
-                                y: top.into(),
-                            },
-                            Size {
-                                width: width.into(),
-                                height: height.into(),
-                            },
-                        ),
-                        decoder_wrapper.into_iter().map(|color_index| {
-                            let color = color_table.get(color_index).unwrap_or(Rgb888::CSS_PURPLE);
+                        &target.bounding_box().into(),
+                        fb.into_iter().map(|color_index| {
+                            if transparent_color_index == Some(color_index) {
+                                return Rgb888::BLACK.into();
+                            }
+                            let color = color_table.get(color_index).unwrap();
                             color.into()
                         }),
                     )?;
@@ -692,7 +708,7 @@ where
     }
 }
 
-impl<C> fmt::Debug for Frame<'_, C> {
+impl<const N: usize, C> fmt::Debug for Frame<'_, N, C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Frame")
             .field("frame_index", &self.frame_index)
@@ -705,7 +721,7 @@ impl<C> fmt::Debug for Frame<'_, C> {
 }
 
 #[cfg(feature = "defmt")]
-impl<C> defmt::Format for Frame<'_, C> {
+impl<const N: usize, C> defmt::Format for Frame<'_, N, C> {
     fn format(&self, f: defmt::Formatter) {
         defmt::write!(
             f,
