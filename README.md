@@ -10,18 +10,18 @@ This crate requires about 20kB of memory to decode a gif.
 
 ## Usage
 
+`Instant` and `Timer` are from Embassy framework, you can replace them with your own delay implementation.
+
 ```rust
 let image = tinygif::Gif::<Rgb565>::from_slice(include_bytes!("../Ferris-240x240.gif")).unwrap();
 loop {
     for frame in image.frames() {
-        info!("frame {:?}", frame);
+        let start = Instant::now();
 
         frame.draw(&mut display).unwrap();
 
-        let delay_ms = frame.delay_centis * 10;
-        info!("delay {}", delay_ms);
-        // Delay here
-        // Timer::after(Duration::from_millis(delay_ms as u64)).await;
+        let remain_delay = ((frame.delay_centis as u64) * 10).saturating_sub(start.elapsed().as_millis());
+        Timer::after_millis(remain_delay).await;
 
         // Or, draw at given offset
         // use embedded_graphics::prelude::DrawTargetExt;
