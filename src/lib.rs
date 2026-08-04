@@ -233,7 +233,7 @@ pub struct ImageBlock<'a> {
 
 impl<'a> ImageBlock<'a> {
     // parse after 0x2c separator
-    pub fn parse(input: &'a [u8]) -> Result<(&[u8], Self), ParseError> {
+    pub fn parse(input: &'a [u8]) -> Result<(&'a [u8], Self), ParseError> {
         let (input, left) = le_u16(input)?;
         let (input, top) = le_u16(input)?;
         let (input, width) = le_u16(input)?;
