@@ -5,7 +5,9 @@
 use core::fmt::{self, Debug};
 use core::marker::PhantomData;
 
-use embedded_graphics::prelude::{DrawTarget, ImageDrawable, OriginDimensions, Point, Size};
+use embedded_graphics::prelude::{
+    DrawTarget, ImageDrawable, OriginDimensions, Point, Size, Transform,
+};
 use embedded_graphics::Pixel;
 use embedded_graphics::{pixelcolor::Rgb888, prelude::PixelColor};
 use parser::eat_len_prefixed_subblocks;
@@ -528,6 +530,7 @@ impl<'a, C: PixelColor> Iterator for FrameIterator<'a, C> {
                 header: &self.gif.raw_gif.header,
                 raw_data: input00,
                 frame_index: self.frame_index,
+                transform: None,
                 _marker: PhantomData,
             };
             self.frame_index += 1;
@@ -547,12 +550,29 @@ pub struct Frame<'a, C> {
     header: &'a Header,
     raw_data: &'a [u8],
     frame_index: usize,
+    transform: Option<Point>,
     _marker: PhantomData<C>,
 }
 
 impl<'a, C> OriginDimensions for Frame<'a, C> {
     fn size(&self) -> Size {
         Size::new(self.header.width as _, self.header.height as _)
+    }
+}
+
+impl<'a, C> Transform for Frame<'a, C>
+where
+    C: PixelColor + From<Rgb888>,
+{
+    fn translate(&self, by: Point) -> Self {
+        let mut frame = self.clone();
+        frame.transform = Some(by);
+        frame
+    }
+
+    fn translate_mut(&mut self, by: Point) -> &mut Self {
+        self.transform = Some(by);
+        self
     }
 }
 
@@ -603,8 +623,14 @@ where
                                 idx += 1;
                                 return None;
                             }
-                            let x = left + (idx % u32::from(width)) as u16;
-                            let y = top + (idx / u32::from(width)) as u16;
+                            let mut x = left + (idx % u32::from(width)) as u16;
+                            let mut y = top + (idx / u32::from(width)) as u16;
+
+                            if let Some(transform) = self.transform {
+                                x = (x as i32 + transform.x) as u16;
+                                y = (y as i32 + transform.y) as u16;
+                            }
+
                             idx += 1;
 
                             let color = color_table.get(color_index).unwrap();
