@@ -1,4 +1,4 @@
-//! Modified version of https://github.com/nwin/lzw
+//! Modified version of <https://github.com/nwin/lzw>
 
 use crate::{bitstream::BitStream, ParseError};
 
