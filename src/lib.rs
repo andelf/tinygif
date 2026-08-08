@@ -711,6 +711,191 @@ impl<C> defmt::Format for Frame<'_, C> {
     }
 }
 
+/// A streaming GIF decoder that reads from an iterator.
+pub struct GifIter<I, C = Rgb888> {
+    iter: I,
+    header: Header,
+    global_color_table: Option<heapless::Vec<u8, 768>>,
+    buffer: heapless::Vec<u8, 4096>,
+    frame_index: usize,
+    color_type: PhantomData<C>,
+}
+
+fn read_le_u16<I: Iterator<Item = u8>>(iter: &mut I) -> Result<u16, ParseError> {
+    let b0 = iter.next().ok_or(ParseError::UnexpectedEndOfFile)?;
+    let b1 = iter.next().ok_or(ParseError::UnexpectedEndOfFile)?;
+    Ok((b0 as u16) | ((b1 as u16) << 8))
+}
+
+fn skip_subblocks<I: Iterator<Item = u8>>(iter: &mut I) -> Result<(), ParseError> {
+    loop {
+        let len = iter.next().ok_or(ParseError::UnexpectedEndOfFile)?;
+        if len == 0 {
+            return Ok(());
+        }
+        for _ in 0..len {
+            iter.next().ok_or(ParseError::UnexpectedEndOfFile)?;
+        }
+    }
+}
+
+impl<I: Iterator<Item = u8>, C: PixelColor> GifIter<I, C> {
+    /// Creates a new `GifIter` from an iterator over `u8`.
+    pub fn from_iter(mut iter: I) -> Result<Self, ParseError> {
+        let mut magic = [0u8; 3];
+        magic[0] = iter.next().ok_or(ParseError::UnexpectedEndOfFile)?;
+        magic[1] = iter.next().ok_or(ParseError::UnexpectedEndOfFile)?;
+        magic[2] = iter.next().ok_or(ParseError::UnexpectedEndOfFile)?;
+        if &magic != b"GIF" {
+            return Err(ParseError::InvalidFileSignature(magic));
+        }
+
+        let mut ver = [0u8; 3];
+        ver[0] = iter.next().ok_or(ParseError::UnexpectedEndOfFile)?;
+        ver[1] = iter.next().ok_or(ParseError::UnexpectedEndOfFile)?;
+        ver[2] = iter.next().ok_or(ParseError::UnexpectedEndOfFile)?;
+        let version = if &ver == b"87a" {
+            Version::V87a
+        } else if &ver == b"89a" {
+            Version::V89a
+        } else {
+            return Err(ParseError::InvalidFileSignature(magic));
+        };
+
+        let width = read_le_u16(&mut iter)?;
+        let height = read_le_u16(&mut iter)?;
+        let flags = iter.next().ok_or(ParseError::UnexpectedEndOfFile)?;
+        let has_global_color_table = flags & 0b1000_0000 != 0;
+        let global_color_table_size = if has_global_color_table {
+            2_usize.pow(((flags & 0b0000_0111) + 1) as u32) * 3
+        } else {
+            0
+        };
+        let color_resolution = (flags & 0b0111_0000) >> 4;
+        let bg_color_index = iter.next().ok_or(ParseError::UnexpectedEndOfFile)?;
+        iter.next().ok_or(ParseError::UnexpectedEndOfFile)?; // pixel aspect ratio
+
+        let mut gct_buf = heapless::Vec::new();
+        if global_color_table_size > 0 {
+            gct_buf.resize(global_color_table_size, 0).map_err(|_| ParseError::UnsupportedHeaderLength(0))?;
+            for b in gct_buf.iter_mut() {
+                *b = iter.next().ok_or(ParseError::UnexpectedEndOfFile)?;
+            }
+        }
+
+        let header = Header {
+            version,
+            width,
+            height,
+            has_global_color_table,
+            color_resolution,
+            bg_color_index,
+        };
+
+        Ok(Self {
+            iter,
+            header,
+            global_color_table: if global_color_table_size > 0 { Some(gct_buf) } else { None },
+            buffer: heapless::Vec::new(),
+            frame_index: 0,
+            color_type: PhantomData,
+        })
+    }
+}
+
+impl<I: Iterator<Item = u8>, C: PixelColor> Iterator for GifIter<I, C> {
+    type Item = Frame<'_, C>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut graphic_ctrl: Option<GraphicControl> = None;
+
+        // 1. Find Graphic Control (0x21 0xf9) or Image Block (0x2c)
+        loop {
+            let marker = self.iter.next()?;
+            if marker == 0x21 {
+                let ext_label = self.iter.next()?;
+                if ext_label == 0xf9 {
+                    let block_size = self.iter.next()?;
+                    if block_size == 4 {
+                        let flags = self.iter.next()?;
+                        let delay = read_le_u16(&mut self.iter).ok()?;
+                        let trans_color = self.iter.next()?;
+                        let term = self.iter.next()?;
+                        if term == 0 {
+                            graphic_ctrl = Some(GraphicControl {
+                                is_transparent: flags & 1 != 0,
+                                transparent_color_index: trans_color,
+                                delay_centis: delay,
+                            });
+                        }
+                    }
+                } else {
+                    if let Err(_) = skip_subblocks(&mut self.iter) {
+                        return None;
+                    }
+                }
+            } else if marker == 0x2c {
+                break;
+            } else if marker == 0x3b {
+                return None;
+            }
+        }
+
+        let ctrl = graphic_ctrl.unwrap_or(GraphicControl {
+            is_transparent: false,
+            transparent_color_index: 0,
+            delay_centis: 0,
+        });
+
+        // 2. Parse Image Descriptor
+        let _left = read_le_u16(&mut self.iter).ok()?;
+        let _top = read_le_u16(&mut self.iter).ok()?;
+        let _width = read_le_u16(&mut self.iter).ok()?;
+        let _height = read_le_u16(&mut self.iter).ok()?;
+        let flags = self.iter.next()?;
+        let has_local_color_table = flags & 0b1000_0000 != 0;
+        let local_color_table_size = if has_local_color_table {
+            2_usize.pow(((flags & 0b0000_0111) + 1) as u32) * 3
+        } else {
+            0
+        };
+
+        // Skip local color table bytes (Frame::draw will parse it from raw_data)
+        for _ in 0..local_color_table_size {
+            self.iter.next()?;
+        }
+
+        let _lzw_min_code_size = self.iter.next()?;
+
+        // 3. Read image data sub-blocks into buffer
+        self.buffer.clear();
+        loop {
+            let len = self.iter.next()?;
+            self.buffer.push(len).unwrap();
+            if len == 0 {
+                break;
+            }
+            for _ in 0..len {
+                self.buffer.push(self.iter.next()?).unwrap();
+            }
+        }
+
+        let frame_index = self.frame_index;
+        self.frame_index += 1;
+
+        Some(Frame {
+            delay_centis: ctrl.delay_centis,
+            is_transparent: ctrl.is_transparent,
+            transparent_color_index: ctrl.transparent_color_index,
+            global_color_table: self.global_color_table.as_ref().map(|v| ColorTable::new(v)),
+            header: &self.header,
+            raw_data: &self.buffer,
+            frame_index,
+            _marker: PhantomData,
+        })
+    }
+}
+
 /// Parse error.
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub enum ParseError {
